@@ -3,6 +3,10 @@ const nodemailer = require('nodemailer');
 const { RAZORPAY_ID_KEY, RAZORPAY_SECRET_KEY, GMAIL_USER, GMAIL_PASS } = process.env;
 
 
+
+const admin = require('../firebaseAdmin');
+
+
 const razorpayInstance = new Razorpay({
     key_id: RAZORPAY_ID_KEY,
     key_secret: RAZORPAY_SECRET_KEY
@@ -97,7 +101,161 @@ const sendPaymentEmail = async (req, res) => {
     }
 };
 
+
+
+const createSessionCookie = async (req, res) => {
+    const { idToken } = req.body;
+    // console.log(idToken)  
+    const expiresIn = 60 * 60 * 24 * 5 * 1000; // 5 days
+
+    try {
+        global.sessionCookie = await admin.auth().createSessionCookie(idToken, { expiresIn });
+        console.log(global.sessionCookie)
+
+        // Set cookie options
+        const options = {
+            maxAge: expiresIn, // Session expiration time
+            httpOnly: true, // The cookie is not accessible via JavaScript
+            secure: process.env.NODE_ENV === 'production', // Set to true in production (HTTPS only)
+            domain: 'localhost', // Set domain to 'localhost' for local testing
+            sameSite: 'None' // Required to allow cross-domain cookies  
+        };
+        res.setHeader('Set-Cookie', `session=${sessionCookie}; Max-Age=${expiresIn}; HttpOnly; Secure=${options.secure}; SameSite=None; Path=/; Domain=localhost`);
+        // res.setHeader('Set-Cookie', `session=${sessionCookie}; Max-Age=${expiresIn}; HttpOnly; Secure=${options.secure}; SameSite=None; Path=/; Domain=localhost`);
+        res.status(200).json({ success: true, message: 'Session cookie created successfully' });
+        
+    } catch (error) {
+        console.error('Error creating session cookie:', error);
+        res.status(401).send('Unauthorized request');
+    }
+};
+
+
+
+const bucket = admin.storage().bucket();
+
+const getSessionCookie = async (req, res) => {
+    try {
+        const session =  global.sessionCookie;; // Read the session cookie from request headers
+        console.log("Session value:", session);
+        if (!session) {
+            return res.status(401).json({ success: false, message: 'No session cookie found' });
+        }
+
+        const decodedClaims = await admin.auth().verifySessionCookie(session, true);
+        const uid = decodedClaims.uid; 
+        console.log("Decoded UID:", uid);
+
+        // Access Realtime Database with admin SDK to fetch user data (email, firstname)
+        const userRef = admin.database().ref('usersData/' + uid);
+        const snapshot = await userRef.once('value');
+
+        if (!snapshot.exists()) {
+            console.log(`No user data found for UID ${uid}`);
+            return res.status(404).json({ success: false, message: 'User data not found' });
+        }
+
+        const userData = snapshot.val();
+        const email = userData.email;
+        const firstName = userData.firstName;
+
+        console.log(`User's email: ${email}`);
+        console.log(`User's firstname: ${firstName}`);
+
+        // Specify the path in Firebase Storage where the user's profile picture is stored
+        const fileName = `profilePictures/${uid}/`;  // Construct the file path
+
+        // List files in the user's folder
+        const [files] = await bucket.getFiles({
+            prefix: fileName,  // Get all files with this prefix (i.e., in the folder)
+        });
+
+        // Check if there are files in the folder
+        if (files.length === 0) {
+            console.log(`No image found for user ${uid}`);
+            return res.status(404).json({ success: false, message: 'No profile picture found' });
+        }
+
+        // Assuming the first file is the user's image
+        const file = files[0];  // Get the first file (or choose based on your logic)
+        const filename = file.name;  // This is the full path to the file
+
+        // Encode the file path to make it URL-friendly
+        const encodedFilePath = encodeURIComponent(filename);
+
+        // Construct the public download URL
+        const publicUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodedFilePath}?alt=media`;
+
+        console.log(`Public URL for user ${uid}: ${publicUrl}`);
+        
+        // Return the public URL and user data as part of the response to be accessed by the client
+        return res.status(200).json({
+            success: true,
+            profilePicURL: publicUrl,
+            email: email,
+            firstName: firstName,
+            session:session,
+        });
+
+    } catch (err) {
+        console.error('Error fetching user data or image:', err);
+        return res.status(500).json({ success: false, message: 'Error fetching user data or image' });
+    }
+};
+
+
+
+
+const verifyToken = async (req, res) => {
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: 'No token provided' });
+    }
+
+    try {
+        // Verify the ID token
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        console.log(decodedToken); // Log for debugging
+
+        // Send back user info
+        res.status(200).json({ uid: decodedToken.uid, email: decodedToken.email });
+    } catch (error) {
+        console.error('Error verifying token:', error); // Log the error
+        res.status(401).json({ error: 'Invalid token' });
+    }
+};
+
+const clearSessionCookie = async (req, res) => {
+    try {
+        const { clearSession } = req.body;
+
+        // Check if session cookie exists in the request headers
+        const sessionCookie = req.cookies.session;
+        if (!sessionCookie) {
+            return res.status(401).json({ success: false, message: 'Unauthorized: No session cookie found' });
+        }
+
+        // If the request is asking to clear the session
+        if (clearSession) {
+            // Clear the session cookie
+            res.clearCookie('session', { path: '/' });
+            return res.status(200).json({ success: true, message: 'Session cookie cleared' });
+        }
+
+        return res.status(400).json({ success: false, message: 'Invalid request' });
+    } catch (err) {
+        console.error('Error clearing session cookie:', err);
+        return res.status(500).json({ success: false, message: 'Failed to clear session cookie' });
+    }
+};
+
+
 module.exports = {
     createOrder,
-    sendPaymentEmail
+    sendPaymentEmail,
+    createSessionCookie,
+    getSessionCookie,
+    clearSessionCookie,
+    verifyToken, // Don't forget to export this function
 };
