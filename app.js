@@ -19,6 +19,6 @@ app.use(express.json()); // To parse JSON bodies
 app.use('/api', paymentRoute);
 
 
-http.listen(5000, function(){
-    console.log('Server is running on port 5000');
+http.listen(5001, function(){
+    console.log('Server is running on port 5001');
 });
